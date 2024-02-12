@@ -1,0 +1,442 @@
+version: "2.1"
+volumes:
+  elasticsearch:
+  postgres:
+  redis:
+  minio:
+  web-node_modules:
+  bots-node_modules:
+  narcissus-node_modules:
+networks:
+  dev:
+services:
+  elasticsearch:
+    build: alegre/elasticsearch
+    environment:
+      discovery.type: single-node
+      transport.host: 127.0.0.1
+      xpack.security.enabled: "false"
+      bootstrap.memory_lock: "true"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m -Dlog4j2.disable.jmx=true"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ports:
+      - "9200:9200"
+    volumes:
+      - "./elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml"
+      - "elasticsearch:/usr/share/elasticsearch/data"
+    networks:
+      - dev
+  postgres:
+    build: ./alegre/postgres
+    platform: linux/x86_64
+    ports:
+      - "5432:5432"
+    volumes:
+      - "postgres:/var/lib/postgresql/data"
+    environment:
+      POSTGRESQL_POSTGRES_PASSWORD: postgres
+      POSTGRESQL_USERNAME: postgres
+      POSTGRESQL_PASSWORD: postgres
+      POSTGRESQL_DATABASE: alegre
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: alegre
+      REPMGR_PASSWORD: repmgrpassword
+      REPMGR_PRIMARY_HOST: pg-0
+      REPMGR_PRIMARY_PORT: 5432
+      REPMGR_PARTNER_NODES: pg-0,pg-1:5432
+      REPMGR_NODE_NAME: pg-0
+      REPMGR_NODE_NETWORK_NAME: pg-0
+      REPMGR_PORT_NUMBER: 5432
+    networks:
+      - dev
+  redis:
+    image: redis:6.2
+    ports:
+      - "6379:6379"
+    volumes:
+      - "redis:/data"
+    networks:
+      - dev
+  minio:
+    image: minio/minio@sha256:fafd3af791a0c564b73d995ef3f8d7bde4d0caf25b32bec3a11dc71a9096479a
+    command: server /data
+    ports:
+      - "9000:9000"
+    volumes:
+      - "minio:/data"
+    environment:
+      MINIO_ACCESS_KEY: AKIAIOSFODNN7EXAMPLE
+      MINIO_SECRET_KEY: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+    networks:
+      - dev
+  elasticmq:
+    image: softwaremill/elasticmq
+    hostname: presto-elasticmq
+    ports:
+      - "9324:9324"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-S", "-O", "-", "127.0.0.1:9324/?Action=ListQueues"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - dev
+  api:
+    build: check-api
+    mem_limit: 4g
+    ports:
+      - "3000:3000"
+      - "3300:3300"
+    depends_on:
+      - elasticsearch
+      - postgres
+      - redis
+      - pender
+      - alegre
+      - narcissus
+    volumes:
+      - "./check-api:/app"
+    environment:
+      RAILS_ENV: development
+      SERVER_PORT: 3000
+    networks:
+      - dev
+  api-background:
+    build: check-api
+    command: /app/docker-background.sh
+    depends_on:
+      - api
+    volumes:
+      - "./check-api:/app"
+    environment:
+      RAILS_ENV: development
+      SERVER_PORT: 3000
+    networks:
+      - dev
+  pender:
+    build: pender
+    platform: linux/x86_64
+    shm_size: 1G
+    ports:
+      - "3200:3200"
+      - "9555:9555"
+    volumes:
+      - "./pender:/app"
+    depends_on:
+      - postgres
+      - redis
+      - minio
+    environment:
+      RAILS_ENV: development
+      SERVER_PORT: 3200
+    networks:
+      - dev
+  pender-background:
+    build: pender
+    platform: linux/x86_64
+    command: /app/docker-background.sh
+    shm_size: 1G
+    volumes:
+      - "./pender:/app"
+    depends_on:
+      - pender
+    environment:
+      RAILS_ENV: development
+      SERVER_PORT: 3200
+    networks:
+      - dev
+  web:
+    build: check-web
+    platform: linux/x86_64
+    ports:
+      - "3333:3333"
+    depends_on:
+      - api
+      - api-background
+    volumes:
+      - "./check-web:/app"
+      - "./check-api:/api"
+      - "./check-ui/.yalc:/root/.yalc"
+      - "web-node_modules:/app/node_modules"
+    environment:
+      PLATFORM: web
+      NODE_ENV: development
+      SERVER_PORT: 3333
+      MODE: development
+    networks:
+      - dev
+  kibana:
+    image: docker.elastic.co/kibana/kibana:7.9.2
+    ports:
+      - "5601:5601"
+    depends_on:
+      - elasticsearch
+    environment:
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+    networks:
+      - dev
+  presto-server:
+    build: presto
+    platform: linux/amd64
+    ports:
+      - "8000:8000"
+    volumes:
+      - "./presto:/app"
+    env_file:
+      - presto/.env_file
+    environment:
+      ROLE: server
+    networks:
+      - dev
+    depends_on:
+      elasticmq:
+        condition: service_healthy
+  presto-image:
+    build: presto
+    platform: linux/amd64
+    volumes:
+      - "./presto:/app"
+    env_file:
+      - presto/.env_file
+    environment:
+      ROLE: worker
+      MODEL_NAME: image.Model
+    networks:
+      - dev
+    depends_on:
+      elasticmq:
+        condition: service_healthy
+  presto-audio:
+    build: presto
+    platform: linux/amd64
+    volumes:
+      - "./presto:/app"
+    env_file:
+      - presto/.env_file
+    environment:
+      ROLE: worker
+      MODEL_NAME: audio.Model
+    networks:
+      - dev
+    depends_on:
+      elasticmq:
+        condition: service_healthy
+  alegre:
+    build: alegre
+    platform: linux/x86_64
+    ports:
+      - "3100:3100"
+    volumes:
+      - "./alegre:/app"
+    depends_on:
+      - postgres
+      - redis
+      - elasticsearch
+      - presto-server
+      - presto-image
+      - presto-audio
+    env_file:
+      - alegre/.env_file
+    networks:
+      - dev
+  queue_worker:
+    build: alegre
+    platform: linux/x86_64
+    command: ["make", "run_rq_worker"]
+    volumes:
+      - "./alegre:/app"
+    depends_on:
+      - redis
+    env_file:
+      - alegre/.env_file
+    networks:
+      - dev
+#  xlm_r_bert_base_nli_stsb_mean_tokens:
+#    build: alegre
+#    platform: linux/x86_64
+#    command: ["make", "run_model"]
+#    volumes:
+#      - "./alegre:/app"
+#    depends_on:
+#      - redis
+#    env_file:
+#      - alegre/.env_file
+#    environment:
+#      MODEL_NAME: meantokens
+#    networks:
+#      - dev
+#  indian_sbert:
+#    build: alegre
+#    platform: linux/x86_64
+#    command: ["make", "run_model"]
+#    volumes:
+#      - "./alegre:/app"
+#    depends_on:
+#      - redis
+#    env_file:
+#      - alegre/.env_file
+#    environment:
+#      MODEL_NAME: indiansbert
+#    networks:
+#      - dev
+#  paraphrase_multilingual_mpnet_base_v2:
+#    build: alegre
+#    platform: linux/x86_64
+#    command: ["make", "run_model"]
+#    volumes:
+#      - "./alegre:/app"
+#    depends_on:
+#      - redis
+#    env_file:
+#      - alegre/.env_file
+#    environment:
+#      MODEL_NAME: paraphrasemultilingualmpnetbasev2
+#    networks:
+#      - dev
+#  mdeberta_v3_filipino:
+#    build: alegre
+#    platform: linux/x86_64
+#    command: ["make", "run_model"]
+#    volumes:
+#      - "./alegre:/app"
+#    depends_on:
+#      - redis
+#    env_file:
+#      - alegre/.env_file
+#    environment:
+#      MODEL_NAME: mdebertav3filipino
+#    networks:
+#      - dev
+#  video:
+#    build: alegre
+#    platform: linux/x86_64
+#    command: ["make", "run_model"]
+#    volumes:
+#      - "./alegre:/app"
+#    depends_on:
+#      - redis
+#    env_file:
+#      - alegre/.env_file
+#    environment:
+#      MODEL_NAME: video
+#    networks:
+#      - dev
+#  audio:
+#    build: alegre
+#    platform: linux/x86_64
+#    command: ["make", "run_model"]
+#    volumes:
+#      - "./alegre:/app"
+#    depends_on:
+#      - redis
+#    env_file:
+#      - alegre/.env_file
+#    environment:
+#      MODEL_NAME: audio
+#    networks:
+#      - dev
+  bots:
+    build: check-bots
+    platform: linux/x86_64
+    volumes:
+      - "./check-bots:/app"
+      - "bots-node_modules:/app/node_modules"
+    ports:
+      - "8586:8586"
+    depends_on:
+      - api
+    environment:
+      NODE_ENV: development
+      SERVER_PORT: 8586
+    networks:
+      - dev
+#  check-slack-bot:
+#    build: check-slack-bot
+#    platform: linux/x86_64
+#    volumes:
+#      - "./check-slack-bot:/app"
+#      - "/app/node_modules"
+#    depends_on:
+#      - api
+#      - redis
+#    networks:
+#      - dev
+  narcissus:
+    build: narcissus
+    platform: linux/x86_64
+    shm_size: 1G
+    volumes:
+      - "./narcissus:/app"
+      - "narcissus-node_modules:/app/node_modules"
+    ports:
+      - "8687:8687"
+    depends_on:
+      - minio
+    environment:
+      NODE_ENV: development
+      SERVER_PORT: 8687
+      DEPLOY_ENV: local
+    networks:
+      - dev
+#  fetch:
+#    volumes:
+#      - "./fetch:/app"
+#    build: fetch
+#    platform: linux/x86_64
+#    depends_on:
+#      - elasticsearch
+#      - redis
+#      - alegre
+#      - pender
+#    ports:
+#      - "9292:9292"
+#    env_file:
+#      - fetch/.env_file
+#    command: start_server
+#    networks:
+#      - dev
+#  fetch-background:
+#    volumes:
+#      - "./fetch:/app"
+#    platform: linux/x86_64
+#    depends_on:
+#      - elasticsearch
+#      - redis
+#      - alegre
+#      - pender
+#    build: fetch
+#    env_file:
+#      - fetch/.env_file
+#    command: run_worker
+#    networks:
+#      - dev
+  mark:
+    build: check-mark
+    platform: linux/x86_64
+    volumes:
+      - "./check-mark:/app"
+      - "./check-api:/api"
+      - "./check-ui/.yalc:/root/.yalc"
+      - "/app/node_modules"
+    networks:
+      - dev
+#  search:
+#    build: check-search
+#    platform: linux/x86_64
+#    volumes:
+#      - "./check-search:/app"
+#      - "/app/node_modules"
+#    ports:
+#      - "8001:8001"
+#    depends_on:
+#      - api
+#    environment:
+#      NODE_ENV: development
+#      SERVER_PORT: 8001
+#      DEPLOY_ENV: development
+#    networks:
+#      - dev
